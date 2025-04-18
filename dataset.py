@@ -1,77 +1,44 @@
 from torch.utils.data import Dataset
-import cv2
 import os
-import torch
-from torch.utils.data import DataLoader
-from torchvision import transforms
 
-class ShadowDetectionDataset(Dataset):
-    """
-    A custom dataset class for shadow detection.
+import cv2
 
-    Args:
-        image_dir (str): The directory path containing the input images.
-        mask_dir (str): The directory path containing the corresponding masks.
+class ShadowDataset(Dataset):
 
-    """
-
-    def __init__(self, image_dir, mask_dir, transform=None):
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
-        self.image_files = os.listdir(image_dir)
-        self.mask_files = os.listdir(mask_dir)
+    def __init__(self, image_dir, mask_dir, removed_dir, transform=None, mode='full'):
+        self.image_paths = self.get_paths(image_dir)
+        self.mask_paths = self.get_paths(mask_dir)
+        self.removed_paths = self.get_paths(removed_dir)
         self.transform = transform
+        self.mode = mode
+    def get_paths(self, dir):
+        return [os.path.join(dir, f) for f in sorted(os.listdir(dir))]
 
     def __len__(self):
-        """
-        Returns the length of the dataset.
-
-        Returns:
-            int: The number of images in the dataset.
-
-        """
-        return len(self.image_files)
+        return len(self.image_paths)
 
     def __getitem__(self, idx):
-        """
-        Returns the image and mask at the given index.
+        shadow_img = cv2.imread(self.image_paths[idx])
+        mask_img = cv2.imread(self.mask_paths[idx], cv2.IMREAD_GRAYSCALE)
+        clean_img = cv2.imread(self.removed_paths[idx])
 
-        Args:
-            idx (int): The index of the image and mask to retrieve.
-
-        Returns:
-            tuple: A tuple containing the image and mask.
-
-        """
-        image_path = os.path.join(self.image_dir, self.image_files[idx])
-        mask_path = os.path.join(self.mask_dir, self.mask_files[idx])
-
-        image = cv2.imread(image_path)
-        mask = cv2.imread(mask_path)
-        mask = cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+        shadow_img = cv2.cvtColor(shadow_img, cv2.COLOR_BGR2RGB)
+        clean_img = cv2.cvtColor(clean_img, cv2.COLOR_BGR2RGB)
 
         if self.transform:
-            image = self.transform(image)
-            mask = self.transform(mask)
+            shadow_img = self.transform(shadow_img)
+            mask_img = self.transform(mask_img)
+            clean_img = self.transform(clean_img)
 
-        return image, mask
-
-def get_train_and_val(image_path, mask_path, batch_size, image_size, num_workers=4):
-
-    transform = transforms.Compose([transforms.ToTensor(),
-                                    transforms.Resize((image_size, image_size)),
-                                    transforms.Normalize(mean=[0.5], std=[0.5]),
-                                    ])
-    
-    
-    dataset = ShadowDetectionDataset(image_path, mask_path, transform=transform)
-
-    #split dataset into train and validation
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    return train_loader, val_dataset
-
-
+        if self.mode == 'mask':
+            return shadow_img, mask_img
+        elif self.mode == 'removal':
+            return shadow_img, mask_img, clean_img
+        elif self.mode == 'full':
+            return {
+                'shadow_img': shadow_img,
+                'mask': mask_img,
+                'clean_img': clean_img
+            }
+        else:
+            raise ValueError(f"Invalid mode {self.mode}")
