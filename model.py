@@ -113,7 +113,7 @@ class ShadowDiscriminator(nn.Module):
                       nn.LeakyReLU(0.2, True)
                     ]
         
-        model += [nn.Conv2d(num_out, 1, 4, 1, 1), nn.Sigmoid()]
+        model += [nn.Conv2d(num_out, 1, 4, 1, 1)]
 
         self.model = nn.Sequential(*model)
 
@@ -164,5 +164,3 @@ def test():
     print("Size of input image: 256x256x4")
     print("Size of output image: 256x256x1")
     print(model(x).shape)
-
-# test()
