@@ -1,6 +1,6 @@
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class UNetBlock(nn.Module):
     def __init__(self, in_channels, out_channels, down=False):
@@ -130,6 +130,179 @@ class ShadowDiscriminator(nn.Module):
         return self.model(x)
 
 
+class SegNetCNN(nn.Module):
+    """
+    Basic implementation of SegNet for image segmentation.
+
+    Args:
+        in_channels (int): Number of input channels (e.g. 3 for RGB).
+        out_channels (int): Number of output classes (e.g. 1 for binary segmentation).
+        init_weights (bool): Whether to initialize weights using Kaiming initialization.
+        nf (int): Base number of feature channels (default is 64).
+
+
+    Loss function should match out_channels value:
+
+        out_channels = 1 : BCEWithLogitsLoss()
+        out_channels > 2 : CrossEntropyLoss()
+
+    """
+    def __init__(self, in_channels=3, out_channels=1, init_weights=True, nf=64, apply_softmax=False):
+        super(SegNetCNN, self).__init__()
+
+        self.apply_softmax = apply_softmax
+
+        # Encoder
+        self.enc1 = self.EncoderBlock(in_channels, nf, 2)
+        self.enc2 = self.EncoderBlock(nf, nf*2, 2)
+        self.enc3 = self.EncoderBlock(nf*2, nf*4, 3)
+        self.enc4 = self.EncoderBlock(nf*4, nf*8, 3)
+        self.enc5 = self.EncoderBlock(nf*8, nf*8, 3)
+
+        #Decoder
+        self.dec5 = self.DecoderBlock(nf*8, nf*8, 3)
+        self.dec4 = self.DecoderBlock(nf*8, nf*4, 3)
+        self.dec3 = self.DecoderBlock(nf*4, nf*2, 3)
+        self.dec2 = self.DecoderBlock(nf*2, nf, 2)
+        self.dec1 = self.DecoderBlock(nf, nf, 2)
+        
+        self.classifier = nn.Conv2d(nf, out_channels, kernel_size=1)
+
+        
+
+
+        if init_weights:
+            self.init_weights()
+
+
+           
+    def forward(self,x):
+        """
+        Forward pass through the SegNet model.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, in_channels, H, W).
+
+        Returns:
+            torch.Tensor: Output segmentation map of shape (batch_size, out_channels, H, W).
+        """   
+        # Encoder
+        x, idx1, size1 = self.enc1(x) 
+        x, idx2, size2 = self.enc2(x)
+        x, idx3, size3 = self.enc3(x)
+        x, idx4, size4 = self.enc4(x)
+        x, idx5, size5 = self.enc5(x)
+       
+        # Decoder
+        x = self.dec5(x, idx5, size5)
+        x = self.dec4(x, idx4, size4)
+        x = self.dec3(x, idx3, size3)
+        x = self.dec2(x, idx2, size2)
+        x = self.dec1(x, idx1, size1)
+
+        x = self.classifier(x)
+
+        if self.apply_softmax:
+            x = F.softmax(x, dim=1)
+
+        return x
+    
+    def init_weights(self):
+        """
+        Initialize the weights of the model using Kaiming Normal initialization.
+
+        This is typically used for layers with ReLU activations.
+        """
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
+
+    class EncoderBlock(nn.Module):
+        """
+        Encoder block consisting of multiple convolutional layers followed by a max-pooling layer.
+
+        Args:
+            in_channels (int): Number of input channels.
+            out_channels (int): Number of output channels.
+            num_conv (int): Number of convolutional layers in the block.
+        """
+        def __init__(self, in_channels, out_channels, num_conv):
+            super().__init__()
+            layers = []
+            for _ in range(num_conv):
+                layers += [
+                    nn.Conv2d(in_channels, out_channels, 3, padding=1),
+                    nn.BatchNorm2d(out_channels),
+                    nn.ReLU(inplace=True)
+                ]
+
+                in_channels = out_channels
+
+            self.conv = nn.Sequential(*layers)
+            self.pool = nn.MaxPool2d(2, stride=2, ceil_mode=True, return_indices=True)
+
+        def forward(self, x):
+            """
+            Forward pass through the encoder block.
+
+            Args:
+                x (torch.Tensor): Input tensor.
+
+            Returns:
+                tuple: Output tensor, pooling indices, and the size of the feature map.
+            """
+            x = self.conv(x)
+            size = x.size()
+            x, indices = self.pool(x)
+            return x, indices, size
+
+    class DecoderBlock(nn.Module):
+        """
+        Decoder block consisting of multiple convolutional layers followed by a max-unpooling layer.
+
+        Args:
+            in_channels (int): Number of input channels.
+            out_channels (int): Number of output channels.
+            num_conv (int): Number of convolutional layers in the block.
+        """
+        def __init__(self, in_channels, out_channels, num_conv):
+            super().__init__()
+            layers = []
+            for _ in range(num_conv):
+                layers += [
+                    nn.Conv2d(in_channels, out_channels, 3, padding=1),
+                    nn.BatchNorm2d(out_channels),
+                    nn.ReLU(inplace=True)
+                ]
+                in_channels = out_channels
+
+            self.conv = nn.Sequential(*layers)
+            self.unpool = nn.MaxUnpool2d(2, stride=2)
+
+        def forward(self, x, indices, size):
+            """
+            Forward pass through the decoder block with unpooling.
+
+            Args:
+                x (torch.Tensor): Input tensor.
+                indices (torch.Tensor): Indices from the corresponding encoder's pooling layer.
+                size (torch.Size): The original size of the feature map from the encoder.
+
+            Returns:
+                torch.Tensor: The output tensor after unpooling and convolution.
+            """
+            x = self.unpool(x, indices, size)
+            x = self.conv(x)
+            return x
+            
+
+
+
+
+
 def init_weights(net, init_gain=0.02):
     """
     Initialize the weights of the network.
@@ -149,18 +322,3 @@ def init_weights(net, init_gain=0.02):
             nn.init.constant_(m.bias.data, 0.0)
     
     net.apply(init_func)
-
-
-
-def test():
-    model = ShadowGenerator(3, 1)
-    x = torch.randn(1, 3, 256, 256)
-    print("Size of input image: 256x256x3")
-    print("Size of output image: 256x256x1")
-    print(model(x).shape)
-
-    model = ShadowDiscriminator()
-    x = torch.randn(1, 4, 256, 256)
-    print("Size of input image: 256x256x4")
-    print("Size of output image: 256x256x1")
-    print(model(x).shape)
