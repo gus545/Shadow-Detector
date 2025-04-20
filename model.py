@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class UNetBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, down=False):
+    def __init__(self, in_channels, out_channels):
         """
         UNetBlock class represents a single block in the U-Net architecture.
 
@@ -13,16 +13,16 @@ class UNetBlock(nn.Module):
             down (bool, optional): Whether to perform downsampling or upsampling. Defaults to False.
         """
         super(UNetBlock, self).__init__()
-        if down:
-            conv_layer = nn.Conv2d(in_channels, out_channels, 4, 2, 1)
-            relu_layer = nn.LeakyReLU(0.2, True)
-        else:
-            conv_layer = nn.ConvTranspose2d(in_channels, out_channels, 4, 2, 1)
-            relu_layer = nn.ReLU(True)
-        
-        norm_layer = nn.BatchNorm2d(out_channels)
 
-        self.model = nn.Sequential(conv_layer, relu_layer, norm_layer)
+        self.model = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+
 
     def forward(self, x):
         """
@@ -36,98 +36,158 @@ class UNetBlock(nn.Module):
         """
         return self.model(x)
 
-
-class ShadowGenerator(nn.Module):
-    """ 
-    ShadowGenerator class represents the generator for shadow masks.
+class UNetCNN(nn.Module):
+    """
+    Basic implementation of a UNet-style CNN
 
     Args:
-        input_channels (int, optional): Number of input channels. Defaults to 3.
-        output_channels (int, optional): Number of output channels. Defaults to 1.
-        ngf (int, optional): Number of filters in the generator. Defaults to 64.
+        in_channels (int): Number of input channels.
+        out_channels (int): Number of output channels.
+        nf (int, optional): Number of feature maps. Defaults to 64.
     """
-    def __init__(self, input_channels=3, output_channels=1, ngf=64):
-        super(ShadowGenerator, self).__init__()
+    def __init__(self, in_channels=3, out_channels=1, nf=64):
+        super(UNetCNN, self).__init__()
 
-        self.input = nn.Conv2d(input_channels, ngf, 4, 2, 1)
+        
+        self.down1 = UNetBlock(in_channels, nf)
+        self.pool1 = nn.MaxPool2d(2, 2)
 
-        # Encoder
-        self.down1 = UNetBlock(ngf, ngf * 2, down=True)
-        self.down2 = UNetBlock(ngf * 2, ngf * 4, down=True)
-        self.down3 = UNetBlock(ngf * 4, ngf * 8, down=True)
+        self.down2 = UNetBlock(nf, nf*2)
+        self.pool2 = nn.MaxPool2d(2, 2)
 
-        # Bottleneck
-        self.bridge1 = UNetBlock(ngf*8, ngf*8, down=True)
-        self.bridge2 = UNetBlock(ngf*8, ngf*8)
+        self.down3 = UNetBlock(nf*2, nf*4)
+        self.pool3 = nn.MaxPool2d(2, 2)
 
-        # Decoder
-        self.up3 = UNetBlock(ngf * 8 * 2, ngf * 4)
-        self.up2 = UNetBlock(ngf * 4 * 2, ngf * 2)
-        self.up1 = UNetBlock(ngf * 2 * 2, ngf)
+        self.down4 = UNetBlock(nf*4, nf*8)
+        self.pool4 = nn.MaxPool2d(2, 2)
 
-        self.output = nn.ConvTranspose2d(ngf*2, output_channels, 4, 2, 1)
-        self.tanh = nn.Tanh()
+        self.bridge = nn.Sequential(UNetBlock(nf*8, nf*16), nn.Dropout2d(0.5))
+
+        self.upsample1 = nn.ConvTranspose2d(nf*16, nf*8, 2, 2)
+        self.up1 = UNetBlock(nf*16, nf*8)
+
+        self.upsample2 = nn.ConvTranspose2d(nf*8, nf*4, 2, 2)
+        self.up2 = UNetBlock(nf*8, nf*4)
+
+        self.upsample3 = nn.ConvTranspose2d(nf*4, nf*2, 2, 2)
+        self.up3 = UNetBlock(nf*4, nf*2)
+
+        self.upsample4 = nn.ConvTranspose2d(nf*2, nf, 2, 2)
+        self.up4 = UNetBlock(nf*2, nf)
+
+        self.output = nn.Conv2d(nf, out_channels, 1)
+        self.tanh = nn.Tanh()       
 
     def forward(self, x):
-        """
-        Forward pass of the ShadowGenerator.
+        # Encoder path
+        x1 = self.down1(x)
+        x2 = self.down2(self.pool1(x1))
+        x3 = self.down3(self.pool2(x2))
+        x4 = self.down4(self.pool3(x3))
 
-        Args:
-            x (torch.Tensor): Input tensor.
+        x5 = self.bridge(self.pool4(x4))
 
-        Returns:
-            torch.Tensor: Output tensor.
-        """
-        x1 = self.input(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.bridge1(x4)
-        x6 = self.bridge2(x5)
-        x7 = self.up3(torch.cat([x4, x6], 1))
-        x8 = self.up2(torch.cat([x3, x7], 1))
-        x9 = self.up1(torch.cat([x2, x8], 1))
-        x10 = self.output(torch.cat([x1, x9], 1))
-        return self.tanh(x10)
+        # Decoder path (with skip connections)
+        x6 = self.up1(torch.cat([x4, F.interpolate(self.upsample1(x5), size=x4.shape[2:], mode='bilinear', align_corners=True)], dim=1))
+        x7 = self.up2(torch.cat([x3, F.interpolate(self.upsample2(x6), size=x3.shape[2:], mode='bilinear', align_corners=True)], dim=1))
+        x8 = self.up3(torch.cat([x2, F.interpolate(self.upsample3(x7), size=x2.shape[2:], mode='bilinear', align_corners=True)], dim=1))
+        x9 = self.up4(torch.cat([x1, F.interpolate(self.upsample4(x8), size=x1.shape[2:], mode='bilinear', align_corners=True)], dim=1))
 
-class ShadowDiscriminator(nn.Module):
-    """ 
-    Discriminator class represents the discriminator for shadow masks.
+        return self.tanh(self.output(x9))
 
-    Args:
-        input_channels (int, optional): Number of input channels. Defaults to 4.
-        ndf (int, optional): Number of filters in the discriminator. Defaults to 64.
-        num_layers (int, optional): Number of layers in the discriminator. Defaults to 3.
-    """
-    def __init__(self, input_channels=4, ndf=64, num_layers=3):
-        super(ShadowDiscriminator, self).__init__()
 
-        model = [nn.Conv2d(input_channels, ndf, 4, 2, 1),
-                 nn.LeakyReLU(0.2, True)]
         
-        for i in range(0, num_layers):
-            num_in = min(2**i * ndf, 512)
-            num_out = min(2**(i+1) * ndf, 512)
-            model += [nn.Conv2d(num_in, num_out, 4, 2, 1), 
-                      nn.BatchNorm2d(num_out),
-                      nn.LeakyReLU(0.2, True)
-                    ]
+# class ShadowGenerator(nn.Module):
+#     """ 
+#     ShadowGenerator class represents the generator for shadow masks.
+
+#     Args:
+#         input_channels (int, optional): Number of input channels. Defaults to 3.
+#         output_channels (int, optional): Number of output channels. Defaults to 1.
+#         ngf (int, optional): Number of filters in the generator. Defaults to 64.
+#     """
+#     def __init__(self, input_channels=3, output_channels=1, ngf=64):
+#         super(ShadowGenerator, self).__init__()
+
+#         self.input = nn.Conv2d(input_channels, ngf, 4, 2, 1)
+
+#         # Encoder
+#         self.down1 = UNetBlock(ngf, ngf * 2, down=True)
+#         self.down2 = UNetBlock(ngf * 2, ngf * 4, down=True)
+#         self.down3 = UNetBlock(ngf * 4, ngf * 8, down=True)
+
+#         # Bottleneck
+#         self.bridge1 = UNetBlock(ngf*8, ngf*8, down=True)
+#         self.bridge2 = UNetBlock(ngf*8, ngf*8)
+
+#         # Decoder
+#         self.up3 = UNetBlock(ngf * 8 * 2, ngf * 4)
+#         self.up2 = UNetBlock(ngf * 4 * 2, ngf * 2)
+#         self.up1 = UNetBlock(ngf * 2 * 2, ngf)
+
+#         self.output = nn.ConvTranspose2d(ngf*2, output_channels, 4, 2, 1)
+#         self.tanh = nn.Tanh()
+
+#     def forward(self, x):
+#         """
+#         Forward pass of the ShadowGenerator.
+
+#         Args:
+#             x (torch.Tensor): Input tensor.
+
+#         Returns:
+#             torch.Tensor: Output tensor.
+#         """
+#         x1 = self.input(x)
+#         x2 = self.down1(x1)
+#         x3 = self.down2(x2)
+#         x4 = self.down3(x3)
+#         x5 = self.bridge1(x4)
+#         x6 = self.bridge2(x5)
+#         x7 = self.up3(torch.cat([x4, x6], 1))
+#         x8 = self.up2(torch.cat([x3, x7], 1))
+#         x9 = self.up1(torch.cat([x2, x8], 1))
+#         x10 = self.output(torch.cat([x1, x9], 1))
+#         return self.tanh(x10)
+
+# class ShadowDiscriminator(nn.Module):
+#     """ 
+#     Discriminator class represents the discriminator for shadow masks.
+
+#     Args:
+#         input_channels (int, optional): Number of input channels. Defaults to 4.
+#         ndf (int, optional): Number of filters in the discriminator. Defaults to 64.
+#         num_layers (int, optional): Number of layers in the discriminator. Defaults to 3.
+#     """
+#     def __init__(self, input_channels=4, ndf=64, num_layers=3):
+#         super(ShadowDiscriminator, self).__init__()
+
+#         model = [nn.Conv2d(input_channels, ndf, 4, 2, 1),
+#                  nn.LeakyReLU(0.2, True)]
         
-        model += [nn.Conv2d(num_out, 1, 4, 1, 1)]
+#         for i in range(0, num_layers):
+#             num_in = min(2**i * ndf, 512)
+#             num_out = min(2**(i+1) * ndf, 512)
+#             model += [nn.Conv2d(num_in, num_out, 4, 2, 1), 
+#                       nn.BatchNorm2d(num_out),
+#                       nn.LeakyReLU(0.2, True)
+#                     ]
+        
+#         model += [nn.Conv2d(num_out, 1, 4, 1, 1)]
 
-        self.model = nn.Sequential(*model)
+#         self.model = nn.Sequential(*model)
 
-    def forward(self, x):
-        """
-        Forward pass of the Discriminator.
+#     def forward(self, x):
+#         """
+#         Forward pass of the Discriminator.
 
-        Args:
-            x (torch.Tensor): Input tensor.
+#         Args:
+#             x (torch.Tensor): Input tensor.
 
-        Returns:
-            torch.Tensor: Output tensor.
-        """
-        return self.model(x)
+#         Returns:
+#             torch.Tensor: Output tensor.
+#         """
+#         return self.model(x)
 
 
 class SegNetCNN(nn.Module):
